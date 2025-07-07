@@ -1,11 +1,723 @@
-hello
-f
-f
-ff
-f
-f
-f
-ff
-f
-ff
-f
+
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, onSnapshot, where, getDocs } from 'firebase/firestore';
+
+// Firebase configuration (provided by the environment)
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// --- IMPORTANT: For demonstration purposes, define an ADMIN_USER_ID here. ---
+// To test admin features:
+// 1. Run the app once.
+// 2. Sign up a new user and select 'Admin' role.
+// 3. After successful sign-up and return to login, copy the "Firebase UID:" displayed at the bottom of the screen.
+// 4. Paste that ID into this ADMIN_USER_ID variable in the code.
+// 5. Rerun the app. Now, when you sign in with the admin account linked to this UID, you will have admin access.
+const ADMIN_USER_ID = "YOUR_ADMIN_USER_ID_HERE"; // Replace with your actual Firebase UID for admin access
+
+// Menu item data (remains the same)
+const menuItems = {
+  coffee: [
+    { id: 'c1', name: 'Espresso', price: 80 },
+    { id: 'c2', name: 'Cappuccino', price: 120 },
+    { id: 'c3', name: 'Latte', price: 120 },
+    { id: 'c4', name: 'Americano', price: 100 },
+    { id: 'c5', name: 'Mocha', price: 150 },
+  ],
+  snacks: [
+    { id: 's1', name: 'Samosa', price: 30 },
+    { id: 's2', name: 'Bajji', price: 25 },
+    { id: 's3', name: 'Vegetable Puffs', price: 40 },
+    { id: 's4', name: 'Chocolate Cookie', price: 50 },
+    { id: 's5', name: 'Muffin', price: 60 },
+  ],
+  juice: [
+    { id: 'j1', name: 'Orange Juice', price: 70 },
+    { id: 'j2', name: 'Apple Juice', price: 75 },
+    { id: 'j3', name: 'Grape Juice', price: 80 },
+    { id: 'j4', name: 'Pineapple Juice', price: 70 },
+    { id: 'j5', name: 'Watermelon Juice', price: 65 },
+    { id: 'j6', name: 'Pomegranate Juice', price: 90 },
+    { id: 'j7', name: 'Carrot Juice', price: 60 },
+    { id: 'j8', name: 'Beetroot Juice', price: 65 },
+    { id: 'j9', name: 'Mixed Fruit Juice', price: 85 },
+    { id: 'j10', name: 'Lemon Mint Juice', price: 55 },
+  ],
+  desserts: [
+    { id: 'd1', name: 'Chocolate Brownie', price: 90 },
+    { id: 'd2', name: 'Ice Cream', price: 100 },
+    { id: 'd3', name: 'Gulab Jamun', price: 40 },
+  ],
+};
+
+// Main App component
+function App() {
+  const [view, setView] = useState('login'); // Initial view is 'login'
+  const [selectedTable, setSelectedTable] = useState(null);
+  const [allTableOrders, setAllTableOrders] = useState({});
+  const [currentTableCart, setCurrentTableCart] = useState([]);
+  const [showConfirmation, setShowConfirmation] = useState(false);
+  const [message, setMessage] = useState('');
+
+  // Firebase states
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [firebaseUid, setFirebaseUid] = useState(null); // This is the UID from Firebase Auth
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
+  // Custom user session states
+  const [loggedInUserRole, setLoggedInUserRole] = useState(null); // 'admin' or 'labor'
+  const [loggedInUsername, setLoggedInUsername] = useState(null);
+
+  // Derived state for isAdmin
+  const isAdmin = loggedInUserRole === 'admin';
+
+  // Initialize Firebase instances and handle initial anonymous login
+  useEffect(() => {
+    const app = initializeApp(firebaseConfig);
+    const authInstance = getAuth(app);
+    const firestoreInstance = getFirestore(app);
+
+    setAuth(authInstance);
+    setDb(firestoreInstance);
+
+    const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
+      if (user) {
+        setFirebaseUid(user.uid);
+      } else {
+        // Sign in anonymously to get a Firebase UID for Firestore rules
+        try {
+          await signInAnonymously(authInstance);
+          setFirebaseUid(authInstance.currentUser?.uid);
+        } catch (error) {
+          console.error("Firebase anonymous sign-in failed:", error);
+          // Fallback to a random ID if anonymous auth fails, though Firestore rules might then fail
+          setFirebaseUid(crypto.randomUUID());
+        }
+      }
+      setIsAuthReady(true);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Effect to load the cart when a table is selected
+  useEffect(() => {
+    if (selectedTable !== null) {
+      setCurrentTableCart(allTableOrders[selectedTable] || []);
+    }
+  }, [selectedTable, allTableOrders]);
+
+  // Hash password (simple base64 for demo, NOT secure for production)
+  const hashPassword = (password) => btoa(password);
+
+  // Handle custom user sign up
+  const handleSignUp = async (username, password, role) => {
+    if (!db || !auth) { // Check for auth instance
+      setMessage("Application not ready. Please wait.");
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 2000);
+      return false;
+    }
+
+    const hashedPassword = hashPassword(password);
+
+    try {
+      // 1. Check if username already exists
+      const q = query(collection(db, `artifacts/${appId}/public/user_profiles`), where("username", "==", username));
+      const querySnapshot = await getDocs(q);
+      if (!querySnapshot.empty) {
+        setMessage("Username already exists. Please choose a different one.");
+        setShowConfirmation(true);
+        setTimeout(() => setShowConfirmation(false), 3000);
+        return false;
+      }
+
+      // 2. Ensure a fresh anonymous Firebase UID for the new custom profile
+      // Sign out current anonymous user if any, then sign in anonymously again
+      if (auth.currentUser) {
+        await auth.signOut();
+      }
+      await signInAnonymously(auth);
+      const newFirebaseUid = auth.currentUser?.uid;
+
+      if (!newFirebaseUid) {
+        setMessage("Failed to get a new Firebase UID for sign up. Please try again.");
+        setShowConfirmation(true);
+        setTimeout(() => setShowConfirmation(false), 3000);
+        return false;
+      }
+
+      const userProfileRef = doc(db, `artifacts/${appId}/public/user_profiles`, newFirebaseUid);
+
+      // 3. Create the new user profile in Firestore
+      await setDoc(userProfileRef, {
+        username: username,
+        hashedPassword: hashedPassword,
+        role: role,
+        firebaseUid: newFirebaseUid, // Store the new Firebase UID
+      });
+
+      // 4. Update the main App component's state to reflect the newly signed up user
+      setFirebaseUid(newFirebaseUid); // Update the main app's firebaseUid state
+      // Do NOT set loggedInUserRole or navigate here. LoginScreen will handle navigation back to sign-in.
+      setMessage(`Welcome, ${username}! Please sign in with your new account.`);
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 2000);
+      return true; // Indicate success
+    } catch (error) {
+      console.error("Sign up failed:", error);
+      setMessage("Sign up failed. Please try again. Error: " + error.message); // Provide more detail
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 3000);
+      return false; // Indicate failure
+    }
+  };
+
+  // Handle custom user sign in
+  const handleSignIn = async (username, password) => {
+    if (!db || !firebaseUid) {
+      setMessage("Application not ready. Please wait.");
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 2000);
+      return false;
+    }
+
+    const hashedPassword = hashPassword(password);
+
+    try {
+      // Query for the user profile by username
+      const q = query(collection(db, `artifacts/${appId}/public/user_profiles`), where("username", "==", username));
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        setMessage("Invalid username or password.");
+        setShowConfirmation(true);
+        setTimeout(() => setShowConfirmation(false), 2000);
+        return false;
+      }
+
+      const userProfileDoc = querySnapshot.docs[0];
+      const userProfileData = userProfileDoc.data();
+
+      if (userProfileData.hashedPassword === hashedPassword) {
+        // If passwords match, set the session role and username
+        setLoggedInUserRole(userProfileData.role);
+        setLoggedInUsername(userProfileData.username);
+        // Ensure the firebaseUid state matches the profile's UID for Firestore operations
+        setFirebaseUid(userProfileData.firebaseUid); 
+        setView('tableSelection'); // Navigate to main app view
+        setMessage(`Welcome back, ${userProfileData.username}!`);
+        setShowConfirmation(true);
+        setTimeout(() => setShowConfirmation(false), 2000);
+        return true;
+      } else {
+        setMessage("Invalid username or password.");
+        setShowConfirmation(true);
+        setTimeout(() => setShowConfirmation(false), 2000);
+        return false;
+      }
+    } catch (error) {
+      console.error("Sign in failed:", error);
+      setMessage("Sign in failed. Please try again.");
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 3000);
+      return false;
+    }
+  };
+
+  // Handle table selection
+  const handleTableSelect = (tableNum) => {
+    setSelectedTable(tableNum);
+    setView('menu'); // Go to menu view
+  };
+
+  // Update cart for the current table and save to allTableOrders
+  const updateCurrentTableCart = (newCart) => {
+    setCurrentTableCart(newCart);
+    setAllTableOrders((prevOrders) => ({
+      ...prevOrders,
+      [selectedTable]: newCart,
+    }));
+  };
+
+  // Add menu item to current table's cart
+  const addToCart = (item) => {
+    const newCart = currentTableCart.map(cartItem =>
+      cartItem.id === item.id ? { ...cartItem, quantity: cartItem.quantity + 1 } : cartItem
+    );
+
+    if (!currentTableCart.find(cartItem => cartItem.id === item.id)) {
+      newCart.push({ ...item, quantity: 1 });
+    }
+    updateCurrentTableCart(newCart);
+  };
+
+  // Increment item quantity in current table's cart
+  const incrementQuantity = (itemId) => {
+    const newCart = currentTableCart.map((item) =>
+      item.id === itemId ? { ...item, quantity: item.quantity + 1 } : item
+    );
+    updateCurrentTableCart(newCart);
+  };
+
+  // Decrement item quantity in current table's cart
+  const decrementQuantity = (itemId) => {
+    const newCart = currentTableCart.map((item) =>
+      item.id === itemId ? { ...item, quantity: Math.max(0, item.quantity - 1) } : item
+    ).filter(item => item.quantity > 0); // Remove item if quantity becomes 0
+    updateCurrentTableCart(newCart);
+  };
+
+  // Confirm order for the selected table and save to Firestore
+  const confirmOrder = async () => {
+    if (!isAuthReady || !db || !firebaseUid) {
+      console.error("Firebase not initialized or user not authenticated.");
+      setMessage("Error: Please try again. Firebase not ready.");
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 2000);
+      return;
+    }
+
+    setShowConfirmation(true);
+    setMessage(`Order for Table ${selectedTable} printed! Thank you!`);
+
+    try {
+      const orderId = `order_${Date.now()}`;
+      // Use firebaseUid for user-specific data paths
+      const orderRef = doc(db, `artifacts/${appId}/users/${firebaseUid}/orders`, orderId);
+      const totalAmount = calculateTotal();
+      const orderData = {
+        tableNumber: selectedTable,
+        items: currentTableCart,
+        totalAmount: totalAmount,
+        timestamp: new Date().toISOString(), // ISO string for easy sorting/filtering
+        orderId: orderId,
+        orderedBy: loggedInUsername || 'Unknown', // Store who placed the order
+      };
+
+      await setDoc(orderRef, orderData);
+      console.log("Order saved to Firestore:", orderData);
+
+      // Update daily sales summary - only if user is admin
+      if (isAdmin) {
+        const today = new Date().toISOString().split('T')[0]; //YYYY-MM-DD
+        const dailySummaryRef = doc(db, `artifacts/${appId}/users/${firebaseUid}/daily_sales_summary`, today);
+        const dailySummarySnap = await getDoc(dailySummaryRef);
+
+        if (dailySummarySnap.exists()) {
+          await updateDoc(dailySummaryRef, {
+            totalSales: dailySummarySnap.data().totalSales + totalAmount,
+            totalOrders: dailySummarySnap.data().totalOrders + 1,
+          });
+        } else {
+          await setDoc(dailySummaryRef, {
+            date: today,
+            totalSales: totalAmount,
+            totalOrders: 1,
+          });
+        }
+        console.log("Daily sales summary updated.");
+      } else {
+        console.log("Not an admin. Daily sales summary not updated.");
+      }
+
+    } catch (error) {
+      console.error("Error saving order or updating daily summary:", error);
+      setMessage("Error: Could not save order. Please try again.");
+    }
+
+    setTimeout(() => {
+      setShowConfirmation(false);
+      setMessage('');
+      
+      // Clear the order for the selected table
+      setAllTableOrders((prevOrders) => {
+        const newOrders = { ...prevOrders };
+        delete newOrders[selectedTable]; // Remove the table's order
+        return newOrders;
+      });
+      setCurrentTableCart([]); // Clear current cart view
+      setSelectedTable(null); // Reset table selection
+      setView('tableSelection'); // Return to table selection view
+    }, 2000); // Hide confirmation message after 2 seconds
+  };
+
+  // Calculate total amount for the current table's cart
+  const calculateTotal = () => {
+    return currentTableCart.reduce((total, item) => total + item.price * item.quantity, 0);
+  };
+
+  // Function to navigate back to table selection
+  const backToTableSelection = () => {
+    setSelectedTable(null); // Reset selected table
+    setCurrentTableCart([]); // Clear current cart
+    setView('tableSelection'); // Go back to table selection view
+  };
+
+  // Render content based on view
+  const renderView = () => {
+    if (!isAuthReady) {
+      return (
+        <div className="text-center text-gray-700 text-xl font-semibold">
+          Loading application...
+        </div>
+      );
+    }
+
+    switch (view) {
+      case 'login':
+        return (
+          <LoginScreen
+            onSignIn={handleSignIn}
+            onSignUp={handleSignUp}
+            firebaseUid={firebaseUid} // Pass firebaseUid to LoginScreen for sign-up
+          />
+        );
+      case 'tableSelection':
+        return (
+          <TableSelection
+            onSelectTable={handleTableSelect}
+            allTableOrders={allTableOrders}
+            onViewDailySales={() => setView('dailySales')}
+            isAdmin={isAdmin}
+            onLogout={() => { setView('login'); setLoggedInUserRole(null); setLoggedInUsername(null); setSelectedTable(null); setAllTableOrders({}); setCurrentTableCart([]); }}
+            loggedInUsername={loggedInUsername}
+          />
+        );
+      case 'menu':
+        return (
+          <Menu
+            menuItems={menuItems}
+            addToCart={addToCart}
+            cart={currentTableCart}
+            incrementQuantity={incrementQuantity}
+            decrementQuantity={decrementQuantity}
+            onViewCart={() => setView('orderSummary')}
+            selectedTable={selectedTable}
+            onBackToTables={backToTableSelection}
+          />
+        );
+      case 'orderSummary':
+        return (
+          <OrderSummary
+            cart={currentTableCart}
+            total={calculateTotal()}
+            onConfirmOrder={confirmOrder}
+            onBackToMenu={() => setView('menu')}
+            selectedTable={selectedTable}
+            showConfirmation={showConfirmation}
+            onBackToTables={backToTableSelection}
+          />
+        );
+      case 'dailySales':
+        if (isAdmin) {
+          return (
+            <DailySalesView
+              db={db}
+              userId={firebaseUid} // Use firebaseUid here
+              appId={appId}
+              onBack={() => setView('tableSelection')}
+            />
+          );
+        } else {
+          return (
+            <div className="text-center text-red-600 text-xl font-semibold">
+              Access Denied: You do not have permission to view daily sales.
+              <button
+                onClick={() => setView('tableSelection')}
+                className="mt-4 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-full shadow-md"
+              >
+                Back to Tables
+              </button>
+            </div>
+          );
+        }
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-white flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl p-6 w-full max-w-md md:max-w-lg lg:max-w-xl">
+        <h1 className="text-4xl font-extrabold text-center text-red-800 mb-8 tracking-tight">
+          TN Coffee & Snacks
+        </h1>
+        {renderView()}
+
+        {/* Custom Message Box */}
+        {message && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white p-6 rounded-xl shadow-lg text-center">
+              <p className="text-xl font-semibold text-gray-800">{message}</p>
+              <button
+                onClick={() => setMessage('')}
+                className="mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-full"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+        {/* Display Firebase UID for debugging */}
+        {isAuthReady && firebaseUid && (
+          <div className="text-sm text-gray-500 text-center mt-4">
+            Firebase UID: <span className="font-mono">{firebaseUid}</span>
+            {loggedInUsername && <span className="ml-2">({loggedInUsername} - {loggedInUserRole})</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Login Screen component with Sign Up and Sign In forms
+const LoginScreen = ({ onSignIn, onSignUp, firebaseUid }) => {
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [role, setRole] = useState('labor'); // Default role for sign up
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (isSignUp) {
+      const success = await onSignUp(username, password, role);
+      if (success) {
+        setIsSignUp(false); // Switch back to sign-in form after successful sign-up
+        setUsername(''); // Clear username/password fields
+        setPassword('');
+        setRole('labor'); // Reset role
+      }
+    } else {
+      await onSignIn(username, password); // This still navigates to tableSelection
+    }
+  };
+
+  return (
+    <div className="text-center bg-red-100 p-6 rounded-3xl">
+      <h2 className="text-2xl font-bold text-gray-800 mb-6">{isSignUp ? 'Sign Up' : 'Sign In'}</h2>
+      <form onSubmit={handleSubmit} className="flex flex-col space-y-4">
+        <input
+          type="text"
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          className="p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-red-500"
+          required
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-red-500"
+          required
+        />
+        {isSignUp && (
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-red-500"
+          >
+            <option value="labor">Labor</option>
+            <option value="admin">Admin</option>
+          </select>
+        )}
+        <button
+          type="submit"
+          className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-full shadow-lg transition duration-300 transform hover:scale-105"
+        >
+          {isSignUp ? 'Sign Up' : 'Sign In'}
+        </button>
+      </form>
+      <button
+        onClick={() => setIsSignUp(!isSignUp)}
+        className="mt-4 text-blue-600 hover:underline"
+      >
+        {isSignUp ? 'Already have an account? Sign In' : 'New user? Sign Up'}
+      </button>
+      {firebaseUid && (
+        <div className="text-sm text-gray-500 text-center mt-4">
+          Current Firebase UID: <span className="font-mono">{firebaseUid}</span>
+          <p className="text-xs text-gray-400 mt-1">This UID will be associated with your custom account.</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Table Selection component
+const TableSelection = ({ onSelectTable, allTableOrders, onViewDailySales, isAdmin, onLogout, loggedInUsername }) => {
+  const tables = Array.from({ length: 10 }, (_, i) => i + 1); // 10 tables
+
+  return (
+    <div className="text-center bg-red-100 p-6 rounded-3xl">
+      <h2 className="text-2xl font-bold text-gray-800 mb-4">Welcome, {loggedInUsername || 'Guest'}!</h2>
+      <h3 className="text-xl font-bold text-gray-800 mb-6">Select a Table</h3>
+      <div className="grid grid-cols-3 sm:grid-cols-4 gap-4 mb-6">
+        {tables.map((table) => (
+          <button
+            key={table}
+            onClick={() => onSelectTable(table)}
+            className={`py-4 px-2 rounded-xl shadow-lg transform transition duration-300 hover:scale-105 text-lg
+              ${allTableOrders[table] && allTableOrders[table].length > 0 ? 'bg-orange-400 hover:bg-orange-500 text-white font-bold' : 'bg-red-600 hover:bg-red-700 text-white font-semibold'}
+            `}
+          >
+            Table {table}
+            {allTableOrders[table] && allTableOrders[table].length > 0 && (
+              <span className="block text-sm mt-1">Order Exists</span>
+            )}
+          </button>
+        ))}
+      </div>
+      {isAdmin && ( // Conditionally render "View Daily Sales" button for admin
+        <button
+          onClick={onViewDailySales}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-full shadow-lg transition duration-300 transform hover:scale-105 mb-4"
+        >
+          View Daily Sales
+        </button>
+      )}
+      <button
+        onClick={onLogout}
+        className="w-full bg-gray-400 hover:bg-gray-500 text-white font-bold py-3 rounded-full shadow-lg transition duration-300 transform hover:scale-105"
+      >
+        Logout
+      </button>
+    </div>
+  );
+};
+
+// Menu component
+const Menu = ({ menuItems, addToCart, cart, incrementQuantity, decrementQuantity, onViewCart, selectedTable, onBackToTables }) => {
+  const [activeCategory, setActiveCategory] = useState('coffee');
+
+  const getQuantityInCart = (itemId) => {
+    const item = cart.find((cartItem) => cartItem.id === itemId);
+    return item ? item.quantity : 0;
+  };
+
+  return (
+    <div>
+      <h2 className="text-2xl font-bold text-gray-800 mb-4 text-center">
+        Table {selectedTable} - Menu
+      </h2>
+      <div className="flex justify-center mb-6 space-x-4 flex-wrap">
+        <button
+          onClick={() => setActiveCategory('coffee')}
+          className={`py-2 px-6 rounded-full font-semibold transition duration-300 mb-2 ${
+            activeCategory === 'coffee' ? 'bg-red-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+          }`}
+        >
+          Coffee
+        </button>
+        <button
+          onClick={() => setActiveCategory('snacks')}
+          className={`py-2 px-6 rounded-full font-semibold transition duration-300 mb-2 ${
+            activeCategory === 'snacks' ? 'bg-red-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+          }`}
+        >
+          Snacks
+        </button>
+        <button
+          onClick={() => setActiveCategory('juice')}
+          className={`py-2 px-6 rounded-full font-semibold transition duration-300 mb-2 ${
+            activeCategory === 'juice' ? 'bg-red-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+          }`}
+        >
+          Juice
+        </button>
+        <button
+          onClick={() => setActiveCategory('desserts')}
+          className={`py-2 px-6 rounded-full font-semibold transition duration-300 mb-2 ${
+            activeCategory === 'desserts' ? 'bg-red-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+          }`}
+        >
+          Desserts
+        </button>
+      </div>
+
+      <div className="space-y-4 mb-6">
+        {menuItems[activeCategory].map((item) => (
+          <div
+            key={item.id}
+            className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-gray-200"
+          >
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">{item.name}</h3>
+              <p className="text-gray-600">₹{item.price}</p>
+            </div>
+            <div className="flex items-center space-x-2">
+              {getQuantityInCart(item.id) > 0 ? (
+                <>
+                  <button
+                    onClick={() => decrementQuantity(item.id)}
+                    className="bg-red-500 text-white rounded-full w-8 h-8 flex items-center justify-center text-xl font-bold shadow-md hover:bg-red-600 transition"
+                  >
+                    -
+                  </button>
+                  <span className="text-lg font-semibold text-gray-800 w-6 text-center">
+                    {getQuantityInCart(item.id)}
+                  </span>
+                  <button
+                    onClick={() => incrementQuantity(item.id)}
+                    className="bg-green-500 text-white rounded-full w-8 h-8 flex items-center justify-center text-xl font-bold shadow-md hover:bg-green-600 transition"
+                  >
+                    +
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => addToCart(item)}
+                  className="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-full shadow-md transition duration-300"
+                >
+                  Add
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-col space-y-4 mt-6">
+        {cart.length > 0 && (
+          <button
+            onClick={onViewCart}
+            className="w-full bg-red-700 hover:bg-red-800 text-white font-bold py-3 rounded-full shadow-lg transition duration-300 transform hover:scale-105"
+          >
+            View Order ({cart.reduce((total, item) => total + item.quantity, 0)})
+          </button>
+        )}
+        <button
+          onClick={onBackToTables}
+          className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 rounded-full shadow-md transition duration-300"
+        >
+          Back to Tables
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// Order Summary component
+const OrderSummary = ({ cart, total, onConfirmOrder, onBackToMenu, selectedTable, showConfirmation, onBackToTables }) => {
+  return (
+    <div className="text-center">
+      <h2 className="text-2xl font-bold text-gray-800 mb-4">
+        Table {selectedTable} - Your Order
+      </h2>
+      {cart.length === 0 ? (
+        <p className="text-gray-600 text-lg">Your cart is empty.</p>
+      ) : (
+        <div className="space-y-3 mb-6">
+          {cart.map((item) => (
+            <div key={item.id} className="flex justify-between items-center bg-gray-50 p-3 rounded-lg shadow-sm">
+              <span className="text-gray-800 font-medium">{item.name} (x{item.quantity})</span>
+              <span className="text-gray-700 font-semibold">₹{item.price * item.quantity}</span>
+            </div>
+          ))}
+          <div className="
